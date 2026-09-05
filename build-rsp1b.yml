@@ -1,0 +1,117 @@
+name: Build patched SDRangel RSP1B plugin
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout this patch repository
+        uses: actions/checkout@v4
+
+      - name: Checkout exact SDRangel 7.27.2 source
+        uses: actions/checkout@v4
+        with:
+          repository: f4exb/sdrangel
+          ref: v7.27.2
+          path: sdrangel-src
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Verify exact upstream commit
+        shell: pwsh
+        run: |
+          $commit = (git -C sdrangel-src rev-parse HEAD).Trim()
+          Write-Host "SDRangel commit: $commit"
+          if ($commit -ne "97e9e21fe9754b363ae70caac822802d908e8acd") {
+            throw "Unexpected SDRangel commit. Expected v7.27.2 commit 97e9e21fe9754b363ae70caac822802d908e8acd."
+          }
+
+      - name: Apply RSP1B stability patch
+        shell: pwsh
+        run: |
+          git -C sdrangel-src apply --check "$env:GITHUB_WORKSPACE\patches\sdrangel_7.27.2_rsp1b_stability.patch"
+          git -C sdrangel-src apply "$env:GITHUB_WORKSPACE\patches\sdrangel_7.27.2_rsp1b_stability.patch"
+          git -C sdrangel-src diff --check
+          git -C sdrangel-src diff -- plugins/samplesource/sdrplayv3
+
+      - name: Install basic build tools
+        shell: pwsh
+        run: |
+          choco install ninja cmake nsis.install patch -y --no-progress
+          ninja --version
+          cmake --version
+
+      - name: Enable MSVC 2022 x64
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Boost 1.73.0
+        shell: bash
+        env:
+          BOOST_ROOT: ${{ github.workspace }}\downloads\boost
+          BOOST_DEST: C:\Libraries
+          BOOST_URL: https://archives.boost.io/release/1.73.0/source/boost_1_73_0.tar.bz2
+        run: |
+          mkdir -p "$BOOST_ROOT"
+          mkdir -p "$BOOST_DEST"
+          curl --progress-bar --location --output "$BOOST_ROOT/download.tar.bz2" "$BOOST_URL"
+          7z -o"$BOOST_ROOT" x "$BOOST_ROOT/download.tar.bz2" -y -bd
+          7z -o"$BOOST_ROOT" x "$BOOST_ROOT/download.tar" -y -bd
+          cd "$BOOST_ROOT"
+          cp -r boost_* "$BOOST_DEST"
+
+      - name: Install Qt 6.9.3
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.9.3'
+          dir: 'C:/'
+          arch: win64_msvc2022_64
+          setup-python: 'false'
+          modules: 'qtcharts qtscxml qt5compat qtlocation qtmultimedia qtpositioning qtserialport qtspeech qtwebsockets qtwebengine qtshadertools qtwebchannel'
+
+      - name: Configure SDRangel
+        shell: pwsh
+        run: |
+          cmake -S sdrangel-src -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DENABLE_QT6=ON `
+            -DARCH_OPT=SSE4_2 `
+            -DDEBUG_OUTPUT=ON `
+            -DENABLE_MIRISDR=OFF `
+            -DBUILD_SERVER=OFF `
+            "-DCMAKE_PREFIX_PATH=C:\Qt\6.9.3\msvc2022_64;C:\Libraries\boost_1_73_0"
+
+      - name: Build patched SDRPlayV3 plugin
+        shell: pwsh
+        run: |
+          cmake --build build --config Release --target inputsdrplayv3
+
+      - name: Collect DLL and diagnostics
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifact | Out-Null
+          $dll = Get-ChildItem -Path build -Recurse -Filter inputsdrplayv3.dll | Select-Object -First 1
+          if (-not $dll) { throw "inputsdrplayv3.dll was not produced." }
+          Copy-Item $dll.FullName artifact\inputsdrplayv3.dll
+
+          $pdb = Get-ChildItem -Path build -Recurse -Filter inputsdrplayv3.pdb | Select-Object -First 1
+          if ($pdb) { Copy-Item $pdb.FullName artifact\inputsdrplayv3.pdb }
+
+          $hash = (Get-FileHash artifact\inputsdrplayv3.dll -Algorithm SHA256).Hash
+          "Patched SDRangel v7.27.2 / SDRPlayV3" | Out-File artifact\BUILD_INFO.txt -Encoding utf8
+          "Upstream commit: 97e9e21fe9754b363ae70caac822802d908e8acd" | Out-File artifact\BUILD_INFO.txt -Append -Encoding utf8
+          "Qt: 6.9.3 MSVC 2022 x64" | Out-File artifact\BUILD_INFO.txt -Append -Encoding utf8
+          "DLL SHA256: $hash" | Out-File artifact\BUILD_INFO.txt -Append -Encoding utf8
+          Get-Content artifact\BUILD_INFO.txt
+
+      - name: Upload patched plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: inputsdrplayv3-patched-v7.27.2
+          path: artifact/*
+          if-no-files-found: error
