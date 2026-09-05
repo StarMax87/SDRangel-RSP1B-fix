@@ -1,0 +1,507 @@
+diff --git a/plugins/samplesource/sdrplayv3/sdrplayv3input.cpp b/plugins/samplesource/sdrplayv3/sdrplayv3input.cpp
+index 0000000..1111111 100644
+--- a/plugins/samplesource/sdrplayv3/sdrplayv3input.cpp
++++ b/plugins/samplesource/sdrplayv3/sdrplayv3input.cpp
+@@ -98,42 +98,59 @@ bool SDRPlayV3Input::openDevice()
+         return false;
+     }
+ 
++    m_dev = nullptr;
++    m_devParams = nullptr;
++
+     sdrplay_api_LockDeviceApi();
+     sdrplay_api_ErrT err;
+-    unsigned int count;
+-    if ((err = sdrplay_api_GetDevices(m_devs, &count, sizeof(m_devs) / sizeof(sdrplay_api_DeviceT))) == sdrplay_api_Success)
++    unsigned int count = 0;
++
++    err = sdrplay_api_GetDevices(m_devs, &count, sizeof(m_devs) / sizeof(sdrplay_api_DeviceT));
++    if (err != sdrplay_api_Success)
+     {
+-        m_dev = &m_devs[m_devNumber];
+-        m_dev->tuner = sdrplay_api_Tuner_A;
+-        m_dev->rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
+-        if ((err = sdrplay_api_SelectDevice(m_dev)) == sdrplay_api_Success)
+-        {
+-            sdrplay_api_UnlockDeviceApi();
+-            if ((err = sdrplay_api_GetDeviceParams(m_dev->dev, &m_devParams)) == sdrplay_api_Success)
+-            {
+-                qDebug() << "SDRPlayV3Input::openDevice: opened successfully";
+-            }
+-            else
+-            {
+-                qCritical() << "SDRPlayV3Input::openDevice: could not get device parameters: " << sdrplay_api_GetErrorString(err);
+-                return false;
+-            }
+-        }
+-        else
+-        {
+-            qCritical() << "SDRPlayV3Input::openDevice: could not select device: " << sdrplay_api_GetErrorString(err);
+-            sdrplay_api_UnlockDeviceApi();
+-            return false;
+-        }
++        qCritical() << "SDRPlayV3Input::openDevice: could not get devices: " << sdrplay_api_GetErrorString(err);
++        sdrplay_api_UnlockDeviceApi();
++        return false;
+     }
+-    else
++
++    if (count == 0 || m_devNumber < 0 || static_cast<unsigned int>(m_devNumber) >= count)
+     {
+-        qCritical() << "SDRPlayV3Input::openDevice: could not get devices: " << sdrplay_api_GetErrorString(err);
++        qCritical() << "SDRPlayV3Input::openDevice: invalid device sequence" << m_devNumber << "device count" << count;
+         sdrplay_api_UnlockDeviceApi();
+         return false;
+     }
++
++    m_dev = &m_devs[m_devNumber];
++    m_dev->tuner = sdrplay_api_Tuner_A;
++    m_dev->rspDuoMode = sdrplay_api_RspDuoMode_Single_Tuner;
++
++    err = sdrplay_api_SelectDevice(m_dev);
++
++    // IMPORTANT: the API selection lock must be released exactly once.
++    // The original 7.27.2 code unlocked here and then unlocked a second
++    // time at the end of openDevice().
+     sdrplay_api_UnlockDeviceApi();
+ 
++    if (err != sdrplay_api_Success)
++    {
++        qCritical() << "SDRPlayV3Input::openDevice: could not select device: " << sdrplay_api_GetErrorString(err);
++        m_dev = nullptr;
++        return false;
++    }
++
++    err = sdrplay_api_GetDeviceParams(m_dev->dev, &m_devParams);
++    if (err != sdrplay_api_Success || m_devParams == nullptr)
++    {
++        qCritical() << "SDRPlayV3Input::openDevice: could not get device parameters: " << sdrplay_api_GetErrorString(err);
++        sdrplay_api_ReleaseDevice(m_dev);
++        m_dev = nullptr;
++        m_devParams = nullptr;
++        return false;
++    }
++
++    qDebug() << "SDRPlayV3Input::openDevice: opened successfully";
+     return true;
+ }
+ 
+@@ -150,16 +167,27 @@ bool SDRPlayV3Input::start()
+         return false;
+     }
+ 
++    if (m_sdrPlayThread)
++    {
++        delete m_sdrPlayThread;
++        m_sdrPlayThread = nullptr;
++    }
++
+     qDebug() << "SDRPlayV3Input::start";
+     m_sdrPlayThread = new SDRPlayV3Thread(m_dev, &m_sampleFifo, &m_replayBuffer);
+     m_sdrPlayThread->setLog2Decimation(m_settings.m_log2Decim);
+     m_sdrPlayThread->setFcPos((int) m_settings.m_fcPos);
+     m_sdrPlayThread->startWork();
+     m_running = m_sdrPlayThread->isRunning();
++
++    if (!m_running)
++    {
++        delete m_sdrPlayThread;
++        m_sdrPlayThread = nullptr;
++        return false;
++    }
+ 
+     mutexLocker.unlock();
+     applySettings(m_settings, QList<QString>(), true, true);
+ 
+-    return true;
++    return m_running;
+ }
+@@ -180,10 +208,10 @@ void SDRPlayV3Input::stop()
+ {
+     QMutexLocker mutexLocker(&m_mutex);
+ 
+-    if (!m_running) {
++    if (!m_running && !m_sdrPlayThread) {
+         return;
+     }
+ 
+     qDebug() << "SDRPlayV3Input::stop";
+     m_running = false;
+-    if(m_sdrPlayThread)
++    if (m_sdrPlayThread)
+     {
+         m_sdrPlayThread->stopWork();
+         delete m_sdrPlayThread;
+diff --git a/plugins/samplesource/sdrplayv3/sdrplayv3thread.h b/plugins/samplesource/sdrplayv3/sdrplayv3thread.h
+index 0000000..2222222 100644
+--- a/plugins/samplesource/sdrplayv3/sdrplayv3thread.h
++++ b/plugins/samplesource/sdrplayv3/sdrplayv3thread.h
+@@ -21,6 +21,7 @@
+ #ifndef PLUGINS_SAMPLESOURCE_SDRPLAYV3_SDRPLAYV3THREAD_H_
+ #define PLUGINS_SAMPLESOURCE_SDRPLAYV3_SDRPLAYV3THREAD_H_
+ 
++#include <atomic>
+ #include <QThread>
+ #include <QMutex>
+ #include <QWaitCondition>
+@@ -38,11 +39,11 @@ public:
+     ~SDRPlayV3Thread();
+     void startWork();
+     void stopWork();
+-    bool isRunning() const { return m_running; }
++    bool isRunning() const { return m_running.load(std::memory_order_acquire); }
+     void setSamplerate(int samplerate);
+     void setLog2Decimation(unsigned int log2_decim);
+     void setFcPos(int fcPos);
+-    void setIQOrder(bool iqOrder) { m_iqOrder = iqOrder; }
++    void setIQOrder(bool iqOrder) { m_iqOrder.store(iqOrder, std::memory_order_release); }
+ 
+     void resetRfChanged();
+     bool waitForRfChanged();
+@@ -50,7 +51,7 @@ private:
+     QMutex m_startWaitMutex;
+     QWaitCondition m_startWaiter;
+-    bool m_running;
++    std::atomic_bool m_running;
+     sdrplay_api_DeviceT *m_dev;
+     SampleVector m_convertBuffer;
+     SampleSinkFifo* m_sampleFifo;
+@@ -58,20 +59,21 @@ private:
+ 
+     int m_samplerate;
+-    unsigned int m_log2Decim;
+-    int m_fcPos;
+-    bool m_iqOrder;
++    std::atomic_uint m_log2Decim;
++    std::atomic_int m_fcPos;
++    std::atomic_bool m_iqOrder;
+ 
+     qint16 m_iq[8192];
+     int m_iqCount;
+ 
+-    int m_rfChanged;
++    std::atomic_int m_rfChanged;
+     static const unsigned int m_rfChangedTimeout = 500;
+ 
+     Decimators<qint32, qint16, SDR_RX_SAMP_SZ, 16, true> m_decimatorsIQ;
+     Decimators<qint32, qint16, SDR_RX_SAMP_SZ, 16, false> m_decimatorsQI;
+     void run();
++    void processIQBuffer();
+     void callbackIQ(const qint16* buf, qint32 len);
+     void callbackQI(const qint16* buf, qint32 len);
+ 
+diff --git a/plugins/samplesource/sdrplayv3/sdrplayv3thread.cpp b/plugins/samplesource/sdrplayv3/sdrplayv3thread.cpp
+index 0000000..3333333 100644
+--- a/plugins/samplesource/sdrplayv3/sdrplayv3thread.cpp
++++ b/plugins/samplesource/sdrplayv3/sdrplayv3thread.cpp
+@@ -16,6 +16,7 @@
+ ///////////////////////////////////////////////////////////////////////////////////
+ #include <stdio.h>
+ #include <errno.h>
++#include <algorithm>
+ #include <chrono>
+ #include <thread>
+ #include "sdrplayv3thread.h"
+@@ -35,7 +36,8 @@ SDRPlayV3Thread::SDRPlayV3Thread(sdrplay_api_DeviceT* dev, SampleSinkFifo* samp
+     m_log2Decim(0),
+     m_fcPos(0),
+     m_iqOrder(true),
+-    m_iqCount(0)
++    m_iqCount(0),
++    m_rfChanged(0)
+ {
+ }
+@@ -54,14 +56,14 @@ void SDRPlayV3Thread::startWork()
+     if ((err = sdrplay_api_Init(m_dev->dev, &cbFns, this)) != sdrplay_api_Success)
+     {
+         qCritical() << "SDRPlayV3Thread::run: sdrplay_api_Init error: " << sdrplay_api_GetErrorString(err);
+-        m_running = false;
++        m_running.store(false, std::memory_order_release);
+         return;
+     }
+ 
+     m_startWaitMutex.lock();
+     start();
+ 
+-    while(!m_running) {
++    while (!m_running.load(std::memory_order_acquire)) {
+         m_startWaiter.wait(&m_startWaitMutex, 100);
+     }
+@@ -72,9 +74,9 @@ void SDRPlayV3Thread::stopWork()
+ {
+     sdrplay_api_ErrT err;
+-    if (m_running)
++    if (m_running.exchange(false, std::memory_order_acq_rel))
+     {
+-        m_running = false;
+-
+         if ((err = sdrplay_api_Uninit(m_dev->dev)) != sdrplay_api_Success) {
+             qWarning() << "SDRPlayV3Thread::callbackHelper: sdrplay_api_Uninit error: " << sdrplay_api_GetErrorString(err);
+         }
+@@ -90,74 +92,145 @@ void SDRPlayV3Thread::setSamplerate(int samplerate)
+ 
+ void SDRPlayV3Thread::setLog2Decimation(unsigned int log2_decim)
+ {
+-    m_log2Decim = log2_decim;
++    m_log2Decim.store(log2_decim, std::memory_order_release);
+ }
+ void SDRPlayV3Thread::setFcPos(int fcPos)
+ {
+-    m_fcPos = fcPos;
++    m_fcPos.store(fcPos, std::memory_order_release);
+ }
+ 
+ void SDRPlayV3Thread::resetRfChanged()
+ {
+-    m_rfChanged = 0;
++    m_rfChanged.store(0, std::memory_order_release);
+ }
+ 
+ bool SDRPlayV3Thread::waitForRfChanged()
+ {
+-    for (unsigned int i = 0; i < m_rfChangedTimeout && m_rfChanged == 0; i++)
++    for (unsigned int i = 0; i < m_rfChangedTimeout && m_rfChanged.load(std::memory_order_acquire) == 0; i++) {
+         std::this_thread::sleep_for(std::chrono::milliseconds(1));
+-    return m_rfChanged != 0;
++    }
++    return m_rfChanged.load(std::memory_order_acquire) != 0;
+ }
+ // Don't really need a thread here - just using same structure as other plugins
+ void SDRPlayV3Thread::run()
+ {
+-    m_running = true;
++    m_running.store(true, std::memory_order_release);
+     m_startWaiter.wakeAll();
+ }
++
+ void SDRPlayV3Thread::eventCallback(sdrplay_api_EventT eventId, sdrplay_api_TunerSelectT tuner, sdrplay_api_EventParamsT *params, void *cbContext)
+ {
+-    // Could possibly report params->gainParams.currGain for eventId == sdrplay_api_GainChange
+-    // or indicate ADC overload for eventId ==  sdrplay_api_PowerOverloadChange
+-    (void) eventId;
+-    (void) tuner;
+-    (void) params;
+-    (void) cbContext;
++    SDRPlayV3Thread *thread = static_cast<SDRPlayV3Thread *>(cbContext);
++
++    if (!thread || !thread->m_dev || !thread->m_dev->dev) {
++        return;
++    }
++
++    switch (eventId)
++    {
++    case sdrplay_api_PowerOverloadChange:
++    {
++        // SDRplay requires every power-overload event to be acknowledged.
++        // The stock SDRangel 7.27.2 callback ignores this event completely.
++        sdrplay_api_ErrT err = sdrplay_api_Update(
++            thread->m_dev->dev,
++            tuner,
++            sdrplay_api_Update_Ctrl_OverloadMsgAck,
++            sdrplay_api_Update_Ext1_None);
++
++        if (err != sdrplay_api_Success) {
++            qWarning() << "SDRPlayV3Thread::eventCallback: overload ACK failed:" << sdrplay_api_GetErrorString(err);
++        } else if (params) {
++            qDebug() << "SDRPlayV3Thread::eventCallback: power overload event acknowledged:"
++                     << params->powerOverloadParams.powerOverloadChangeType;
++        }
++        break;
++    }
++    case sdrplay_api_DeviceRemoved:
++        qCritical() << "SDRPlayV3Thread::eventCallback: SDRplay device removed";
++        break;
++    case sdrplay_api_DeviceFailure:
++        qCritical() << "SDRPlayV3Thread::eventCallback: SDRplay device failure";
++        break;
++    default:
++        break;
++    }
+ }
++
+ void SDRPlayV3Thread::callbackHelper(short *xi, short *xq, sdrplay_api_StreamCbParamsT *params, unsigned int numSamples, unsigned int reset, void *ctx)
+ {
+-    (void) params;
+-    (void) reset;
+-    SDRPlayV3Thread* thread = (SDRPlayV3Thread*) ctx;
++    SDRPlayV3Thread *thread = static_cast<SDRPlayV3Thread *>(ctx);
++
++    if (!thread || !xi || !xq || !params) {
++        return;
++    }
+ 
+-    if (params->rfChanged)
+-        thread->m_rfChanged = params->rfChanged;
+-    if (thread->m_running)
++    if (params->rfChanged) {
++        thread->m_rfChanged.store(params->rfChanged, std::memory_order_release);
++    }
++
++    // API 3.15 explicitly says local buffering must be reset when reset != 0.
++    if (reset) {
++        thread->m_iqCount = 0;
++    }
++
++    if (!thread->m_running.load(std::memory_order_acquire)) {
++        return;
++    }
++
++    // m_iq contains interleaved 16-bit I/Q values. The stock code writes the
++    // whole callback first and checks the 8192-entry limit afterwards. That
++    // allows an out-of-bounds write if a callback plus retained remainder is
++    // larger than the buffer. Copy in bounded chunks instead.
++    constexpr int iqCapacity = sizeof(thread->m_iq) / sizeof(thread->m_iq[0]);
++    unsigned int inputPos = 0;
++
++    while (inputPos < numSamples)
+     {
+-        // Interleave samples
+-        for (int i = 0; i < (int)numSamples; i++)
++        int freeShorts = iqCapacity - thread->m_iqCount;
++        unsigned int freeComplex = freeShorts > 1 ? static_cast<unsigned int>(freeShorts / 2) : 0U;
++
++        if (freeComplex == 0)
+         {
+-            thread->m_iq[thread->m_iqCount+i*2] = xi[i];
+-            thread->m_iq[thread->m_iqCount+i*2+1] = xq[i];
++            thread->processIQBuffer();
++
++            if (thread->m_iqCount >= iqCapacity)
++            {
++                qCritical() << "SDRPlayV3Thread::callbackHelper: unable to drain IQ buffer; resetting local buffer";
++                thread->m_iqCount = 0;
++            }
++            continue;
+         }
+-        thread->m_iqCount += numSamples * 2;
+ 
+-        if (thread->m_iqCount > 8192) {
+-            qCritical() << "SDRPlayV3Thread::callbackHelper: IQ buffer too small: " << numSamples;
++        const unsigned int n = std::min(numSamples - inputPos, freeComplex);
++
++        for (unsigned int i = 0; i < n; i++)
++        {
++            const int dst = thread->m_iqCount + static_cast<int>(i * 2U);
++            thread->m_iq[dst] = xi[inputPos + i];
++            thread->m_iq[dst + 1] = xq[inputPos + i];
+         }
+-        // Decimators require length to be a power of 2
+-        int iqLen = lowerPowerOfTwo(thread->m_iqCount);
+ 
+-        if (thread->m_iqOrder) {
+-            thread->callbackIQ(thread->m_iq, iqLen);
+-        } else {
+-            thread->callbackQI(thread->m_iq, iqLen);
+-        }
++        thread->m_iqCount += static_cast<int>(n * 2U);
++        inputPos += n;
++        thread->processIQBuffer();
++    }
++}
+ 
+-        // Shuffle buffer up
+-        int iqRemaining = thread->m_iqCount - iqLen;
+-        memmove(thread->m_iq, &thread->m_iq[iqLen], iqRemaining * sizeof(qint16));
+-        thread->m_iqCount = iqRemaining;
++void SDRPlayV3Thread::processIQBuffer()
++{
++    if (m_iqCount < 2) {
++        return;
++    }
++
++    // Decimators require a power-of-two number of interleaved values.
++    const int iqLen = lowerPowerOfTwo(m_iqCount);
++    if (iqLen < 2) {
++        return;
++    }
++
++    if (m_iqOrder.load(std::memory_order_acquire)) {
++        callbackIQ(m_iq, iqLen);
++    } else {
++        callbackQI(m_iq, iqLen);
++    }
++
++    const int iqRemaining = m_iqCount - iqLen;
++    if (iqRemaining > 0) {
++        memmove(m_iq, &m_iq[iqLen], iqRemaining * sizeof(qint16));
+     }
++    m_iqCount = iqRemaining;
+ }
++
+ void SDRPlayV3Thread::callbackIQ(const qint16* inBuf, qint32 len)
+ {
+     SampleVector::iterator it = m_convertBuffer.begin();
++    const unsigned int log2Decim = m_log2Decim.load(std::memory_order_acquire);
++    const int fcPos = m_fcPos.load(std::memory_order_acquire);
+@@ -181,13 +254,13 @@ void SDRPlayV3Thread::callbackIQ(const qint16* inBuf, qint32 len)
+         }
+         remaining -= len;
+-        if (m_log2Decim == 0)
++        if (log2Decim == 0)
+         {
+             m_decimatorsIQ.decimate1(&it, buf, len);
+         }
+         else
+         {
+-            if (m_fcPos == 0) // Infradyne
++            if (fcPos == 0) // Infradyne
+             {
+-                switch (m_log2Decim)
++                switch (log2Decim)
+                 {
+@@ -213,9 +286,9 @@ void SDRPlayV3Thread::callbackIQ(const qint16* inBuf, qint32 len)
+                     break;
+                 }
+             }
+-            else if (m_fcPos == 1) // Supradyne
++            else if (fcPos == 1) // Supradyne
+             {
+-                switch (m_log2Decim)
++                switch (log2Decim)
+                 {
+@@ -241,7 +314,7 @@ void SDRPlayV3Thread::callbackIQ(const qint16* inBuf, qint32 len)
+             }
+             else // Centered
+             {
+-                switch (m_log2Decim)
++                switch (log2Decim)
+                 {
+@@ -274,6 +347,8 @@ void SDRPlayV3Thread::callbackIQ(const qint16* inBuf, qint32 len)
+ void SDRPlayV3Thread::callbackQI(const qint16* inBuf, qint32 len)
+ {
+     SampleVector::iterator it = m_convertBuffer.begin();
++    const unsigned int log2Decim = m_log2Decim.load(std::memory_order_acquire);
++    const int fcPos = m_fcPos.load(std::memory_order_acquire);
+@@ -294,13 +369,13 @@ void SDRPlayV3Thread::callbackQI(const qint16* inBuf, qint32 len)
+         }
+         remaining -= len;
+-        if (m_log2Decim == 0)
++        if (log2Decim == 0)
+         {
+             m_decimatorsQI.decimate1(&it, buf, len);
+         }
+         else
+         {
+-            if (m_fcPos == 0) // Infradyne
++            if (fcPos == 0) // Infradyne
+             {
+-                switch (m_log2Decim)
++                switch (log2Decim)
+                 {
+@@ -326,9 +401,9 @@ void SDRPlayV3Thread::callbackQI(const qint16* inBuf, qint32 len)
+                     break;
+                 }
+             }
+-            else if (m_fcPos == 1) // Supradyne
++            else if (fcPos == 1) // Supradyne
+             {
+-                switch (m_log2Decim)
++                switch (log2Decim)
+                 {
+@@ -354,7 +429,7 @@ void SDRPlayV3Thread::callbackQI(const qint16* inBuf, qint32 len)
+             }
+             else // Centered
+             {
+-                switch (m_log2Decim)
++                switch (log2Decim)
+                 {

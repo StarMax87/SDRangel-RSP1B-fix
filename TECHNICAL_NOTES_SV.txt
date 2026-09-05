@@ -1,0 +1,15 @@
+Vad patchen ändrar
+=====================
+1. Rättar dubbel sdrplay_api_UnlockDeviceApi() i openDevice().
+2. Kontrollerar vald enhetsindex innan SelectDevice().
+3. Släpper vald enhet om GetDeviceParams misslyckas.
+4. Rapporterar misslyckad stream-start korrekt.
+5. Gör m_running, decimation, fc-position, IQ-order och rfChanged atomiska.
+6. Kvitterar SDRplay PowerOverloadChange enligt SDRplays API-exempel.
+7. Loggar DeviceRemoved och DeviceFailure.
+8. Respekterar stream-callbackens reset-flagga och nollställer lokal IQ-buffer.
+9. Förhindrar skrivning utanför m_iq[8192] genom begränsad blockkopiering.
+10. Läser decimation/fc-position konsekvent per callback.
+
+Syftet är att eliminera flera konkreta race-/buffer-/API-livscykelproblem
+i SDRPlayV3-kodvägen och samtidigt ge bättre felinformation om enheten faller bort.

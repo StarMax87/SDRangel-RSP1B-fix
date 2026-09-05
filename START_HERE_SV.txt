@@ -1,0 +1,52 @@
+SDRangel 7.27.2 – RSP1B stability build package
+================================================
+
+DETTA ÄR BYGGPAKETET. Det innehåller inte en färdig DLL ännu.
+
+Enklaste och säkraste sättet är att låta GitHub Actions kompilera DLL-filen
+i en ren Windows/MSVC/Qt-miljö. Workflow-filen i detta paket bygger exakt
+SDRangel v7.27.2 och applicerar RSP1B-patchen före kompilering.
+
+SNABBA STEG – GITHUB CLOUD BUILD
+--------------------------------
+1. Skapa ett nytt tomt GitHub-repository (det kan vara PRIVATE).
+2. Ladda upp HELA innehållet i denna mapp, inklusive den dolda mappen .github.
+3. Öppna fliken Actions i repositoryt.
+4. Välj "Build patched SDRangel RSP1B plugin".
+5. Klicka "Run workflow".
+6. När bygget är klart: öppna körningen och hämta artifact:
+      inputsdrplayv3-patched-v7.27.2
+7. Packa upp artifacten. Där finns inputsdrplayv3.dll.
+8. STÄNG SDRangel och SDRconnect.
+9. Starta PowerShell som administratör och kör:
+      powershell -ExecutionPolicy Bypass -File .\tools\INSTALL_PATCHED_DLL.ps1 -PatchedDll "C:\sökväg\inputsdrplayv3.dll"
+
+Installationsskriptet tar automatiskt backup av originalet innan det ersätts.
+
+ÅTERSTÄLLNING
+-------------
+Om den modifierade DLL-filen inte hjälper:
+  powershell -ExecutionPolicy Bypass -File .\tools\RESTORE_ORIGINAL.ps1 -BackupFolder "C:\Program Files\SDRangel\plugins\RSP1B_backup_YYYYMMDD-HHMMSS"
+
+VIKTIGT
+-------
+- Använd bara DLL som byggts för exakt v7.27.2.
+- Behåll original-DLL som backup.
+- Kör inte SDRangel och SDRconnect samtidigt när du testar RSP1B.
+- Den modifierade DLL-filen blir INTE kodsignerad av SDRangels officiella certifikat.
+- Patchen är en diagnostisk/stabilitetsfix. Den är inte en officiell SDRangel-release.
+
+KONTROLLERAD INSTALLATION
+-------------------------
+Din uppladdade originalfil:
+  C:\Program Files\SDRangel\plugins\inputsdrplayv3.dll
+  SHA256 c67b925562b2882dead2b553402122f740aa72b803aeb80fc62a7c8d89f2fca6
+
+Din uppladdade sdrplay_api.dll:
+  SHA256 35f8988bc7b4c039b0a7a03fa8c023dada56f8d1076fcea10f33b0163c196d38
+
+KÄLLVERSION
+-----------
+SDRangel v7.27.2
+Commit: 97e9e21fe9754b363ae70caac822802d908e8acd
+Qt: 6.9.3 / MSVC 2022 x64
